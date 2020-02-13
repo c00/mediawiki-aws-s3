@@ -45,7 +45,7 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 			require_once __DIR__ . '/AmazonS3ClientMock.php';
 
 			echo( __CLASS__ . ": using AmazonS3ClientMock instead of the real S3Client.\n" );
-			self::$backend->client = new AmazonS3ClientMock();
+			AmazonS3ClientMock::installHandler( self::$backend->client );
 		}
 	}
 

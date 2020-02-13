@@ -14,8 +14,13 @@
 	GNU General Public License for more details.
 */
 
+use Aws\CommandInterface;
 use Aws\Command;
+use Aws\Result;
 use Aws\S3\Exception\S3Exception;
+use Aws\S3\S3Client;
+use Psr\Http\Message\RequestInterface;
+use GuzzleHttp\Promise;
 
 /**
  * @file
@@ -24,6 +29,122 @@ use Aws\S3\Exception\S3Exception;
  * NOTE: we only need methods/features that are used by AmazonS3FileBackend, nothing else.
  */
 class AmazonS3ClientMock {
+	public static function installHandler( S3Client $client ) {
+		$client->getHandlerList()->setHandler( [ new self, 'handler' ] );
+	}
+
+	/**
+	 * @var Aws\CommandInterface
+	 */
+	public $currentCommand;
+
+	/**
+	 * AWS handler. Intercepts all commands and supplies results.
+	 * @see https://docs.aws.amazon.com/sdk-for-php/v3/developer-guide/guide_handlers-and-middleware.html
+	 */
+	public function handler( CommandInterface $cmd, RequestInterface $request ) {
+		$this->currentCommand = $cmd;
+
+		$overrideMethod = lcfirst( $cmd->getName() );
+		if ( !method_exists( $this, $overrideMethod ) ) {
+			throw new MWException( "Method $overrideMethod is not implemented in this mock." );
+		}
+
+		error_log( "Overriding $overrideMethod" );
+
+		$result = new Result( $this->$overrideMethod( $cmd->toArray() ) );
+		return Promise\promise_for( $result );
+	}
+
+	public function fail( $code ) {
+		throw new S3Exception( $code, $this->currentCommand, [ 'code' => $code ] );
+	}
+
+	public function assertBucketExists( $bucket ) {
+		if ( !isset( $this->fakeStorage[$bucket] ) ) {
+			$this->fail( 'NoSuchBucket' );
+		}
+	}
+
+	public function success( array $resultData = [] ) {
+		return $resultData + [ '@metadata' => [ 'statusCode' => 200 ] ];
+	}
+
+	/**
+	 * @param array $opt
+	 * @phan-param array{Bucket:string} $opt
+	 */
+	public function createBucket( array $opt ) {
+		$bucket = $opt['Bucket'];
+		$this->fakeStorage[$bucket] = [];
+
+		return $this->success( [ 'Location' => "/$bucket" ] );
+	}
+
+	/**
+	 * @param array $opt
+	 * @phan-param array{Bucket:string} $opt
+	 */
+	public function headBucket( array $opt ) {
+		$bucket = $opt['Bucket'];
+		$this->assertBucketExists( $bucket );
+		return $this->success();
+	}
+
+	/**
+	 * @param array $opt
+	 * @phan-param array{Bucket:string,Key:string} $opt
+	 */
+	public function deleteObject( array $opt ) {
+		$bucket = $opt['Bucket'];
+		$key = $opt['Key'];
+
+		$this->assertBucketExists( $bucket );
+
+		unset( $this->fakeStorage[$bucket][$key] );
+		return $this->success();
+	}
+
+	/**
+	 * @param array $opt
+	 * @phan-param array{Bucket:string,Key:string,Body:string|resource} $opt
+	 */
+	public function putObject( array $opt ) {
+		$bucket = $opt['Bucket'];
+		$key = $opt['Key'];
+		$body = $opt['Body'];
+
+		$this->assertBucketExists( $bucket );
+
+		if ( is_resource( $body ) ) {
+			$body = stream_get_contents( $body );
+		}
+
+		$this->fakeStorage[$bucket][$key] = array_filter( [
+			'ACL' => isset( $opt['ACL'] ) ? $opt['ACL'] : 'private',
+			'Body' => $body,
+			'ContentType' => isset( $opt['ContentType'] ) ? $opt['ContentType'] : null,
+			'Metadata' => isset( $opt['Metadata'] ) ? $opt['Metadata'] : null,
+			'LastModified' => wfTimestamp( TS_RFC2822 )
+		] );
+		return $this->success();
+	}
+
+	/**
+	 * @param array $opt
+	 */
+	public function listObjects( array $opt ) {
+		$bucket = $opt['Bucket'];
+		$limit = $opt['Limit'];
+		$prefix = $opt['Prefix'];
+		$delimiter = $opt['Delimiter'];
+
+		throw new MWException( 'FIXME: listObjects() is not yet implemented' );
+	}
+
+	/*---------------------------------*/
+	// Methods below are from before
+
 	const FAKE_HTTP403_URL = 'http.403';
 
 	/**
@@ -41,54 +162,12 @@ class AmazonS3ClientMock {
 	}
 
 	/**
-	 * @param array $opt
-	 * @phan-param array{Bucket:string} $opt
-	 */
-	public function createBucket( array $opt ) {
-		$bucket = $opt['Bucket'];
-		$this->fakeStorage[$bucket] = [];
-	}
-
-	/**
 	 * @param string $bucket
 	 * @param string $key
 	 * @return bool
 	 */
 	public function doesObjectExist( $bucket, $key ) {
 		return isset( $this->fakeStorage[$bucket][$key] );
-	}
-
-	/**
-	 * @param array $opt
-	 * @phan-param array{Bucket:string,Key:string} $opt
-	 */
-	public function deleteObject( array $opt ) {
-		$bucket = $opt['Bucket'];
-		$key = $opt['Key'];
-
-		unset( $this->fakeStorage[$bucket][$key] );
-	}
-
-	/**
-	 * @param array $opt
-	 * @phan-param array{Bucket:string,Key:string,Body:string|resource} $opt
-	 */
-	public function putObject( array $opt ) {
-		$bucket = $opt['Bucket'];
-		$key = $opt['Key'];
-		$body = $opt['Body'];
-
-		if ( is_resource( $body ) ) {
-			$body = stream_get_contents( $body );
-		}
-
-		$this->fakeStorage[$bucket][$key] = array_filter( [
-			'ACL' => isset( $opt['ACL'] ) ? $opt['ACL'] : 'private',
-			'Body' => $body,
-			'ContentType' => isset( $opt['ContentType'] ) ? $opt['ContentType'] : null,
-			'Metadata' => isset( $opt['Metadata'] ) ? $opt['Metadata'] : null,
-			'LastModified' => wfTimestamp( TS_RFC2822 )
-		] );
 	}
 
 	// phpcs:disable Generic.Files.LineLength.TooLong
